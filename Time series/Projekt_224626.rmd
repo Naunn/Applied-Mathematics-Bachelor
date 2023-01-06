@@ -1,0 +1,948 @@
+---
+title: "Milk"
+author: "Bartosz Lewandowski"
+date: "09 06 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo= F}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(TSA) #Zbiór danych milk (Średnia miesięczna produkcja mleka na krowę w USA, 01/1994 - 12/2005)
+library(itsmr) #Wykłady
+library(fpp3) #Hyndmann https://cran.r-project.org/web/packages/fpp3/index.html
+library(bsts) #Google https://cran.r-project.org/web/packages/bsts/index.html
+library(prophet) #Facebook https://cran.r-project.org/web/packages/prophet/index.html
+```
+
+```{r, echo= F, include= F}
+# Funkcja fSeason
+
+fSeason<-function(x,s){    #średnia z x w okresie s
+  n<-length(x); N<-floor(n/s)
+  d<-frequency(x)
+  ww<-rep(0,s)    #do liczenia średnich - na początek "0"
+  for(k in 1:s){
+    div = N
+    for(j in 0:(N-1)){
+      ww[k] <- ww[k]+x[k+j*s]
+    }
+    if (k+N*s<=n){                #jeszcze 1 składnik "na końcu"
+      div = N+1
+      ww[k] <- ww[k]+x[k+N*s]
+    }
+    ww[k] <- ww[k]/div
+  }
+  ss <- ww-mean(ww)   #to jest 1 sezon
+  for(k in (s+1):n) 
+    ss[k]=ss[k-s]
+  xs<-ts(ss,start=start(x),frequency=d)
+  xs
+}
+```
+
+W praktyce zawodowej, coraz częściej możemy się spotkać z terminem szeregów czasowych, który pochodzi z dziedziny statystyki oraz ekonometrii. Głównym założeniem konstruowania szeregów czasowych jest predykcja przyszłych wyników/danych. Z uwagi na rosnące zainteresowanie tą metodą, pojawia się coraz więcej propozycji oraz bilbiotek realizujacych to zagadnienie. Natmoiast nalezy mieć na względzie, że wykorzystanie takowych gotowych metod nie jest równoznaczne z przeprowadzeniem klarownych przewidywań. Co za tym idzie, należy zrozumieć badane dane wraz z ich odpowiednią wcześniejszą dekompozycją. W tym projekcie wpierw przeprowadzimy takową dekompozycję, następnie skorzystamy ze znanych już bibliotek, a nastepnie przejdziemy do zyskujących na popularności, bardziej zautomatyzowanych metod predykcji. Należy również mieć na względzie, że autorzy bilbiotek stosują własne wybrane metody przekształcania danych, chociażby jak wymogi ich wskazywania algorytmom w różnej postaci. Dodatkowo, należy również zdawać sobie sprawę, że im bardziej zautomatyzowana metoda, tym bardziej zaawansowane są jej wewnętrzne metody, nierzadko współtworzone przez doświadczonych programistów.
+
+# Część I - ręczna dekompozycja szeregu
+<details>
+  <summary>Kliknij, aby rozwinąć</summary>
+  
+## Zaimportowanie zbioru danych+ wstepna analiza
+```{r}
+data(milk) # Zaimportowanie danych  z biblioteki "TSA"
+str(milk) # Gotowe
+plot(decompose(milk)) # Wstepny podglad z uzyciem funkcji decompose()
+plot(milk, main= "Miesieczna produkcja mleka") # Po ksztalcie wykresu, mozemy wstepnie stwierdzic, ze mamy do czynienia z modelem addytywnym
+plot(milk %>% window(start= 1994, end= 1998)) # Wstepne podejrzenie pada na freq= 12 (rok)
+```
+
+## Szukanie kandydata na trend
+```{r}
+# Do wylonienia kandydatow na trend posluzymy sie kodem z zajec
+
+# Wprowadzmy zmienne
+ly <- lowess(milk)
+t <- time(milk)
+N <- milk %>% length()
+
+# Wykresy porownawczy
+plot(milk, main= "Dane oryginalne+ lowess(milk)")
+lines(ly, col= 2)
+
+# Teraz naniesmy na wykres kolejne trendy
+plot(milk, main= "Dane z naniesionymi trendami")
+lines(ly, col= "grey") # Na razie wyszarzamy lowess()
+
+X <- matrix(t)
+lsf1<- lsfit(X,milk)
+lc<- lsf1$coefficients
+yr1 <- lc[1]+ lc[2]*t
+lines(yr1,col=1)
+err1 <- sum(lsf1$residuals^2)/N
+
+t2 <- (t-mean(time(milk)))^2
+X <- cbind(X,t2)
+lsf2<- lsfit(X,milk)
+lc<- lsf2$coefficients
+yr2 <- lc[1]+ lc[2]*t + lc[3]*t2
+
+lines(yr2,col=2)
+err2 <- sum(lsf2$residuals^2)/N
+
+t3 <- (t-mean(time(milk)))^3                 
+X <- cbind(X,t3)
+lsf3<- lsfit(X,milk)
+lc<- lsf3$coefficients
+yr3 <- lc[1]+ lc[2]*t + lc[3]*t2 +lc[4]*t3
+
+lines(yr3,col=3)
+err3 <- sum(lsf3$residuals^2)/N
+
+t4 <- (t-mean(time(milk)))^4
+X <- cbind(X,t4)
+lsf4<- lsfit(X,milk)
+lc<- lsf4$coefficients
+yr4 <- lc[1]+ lc[2]*t + lc[3]*t2 +lc[4]*t3+lc[5]*t4
+
+lines(yr4,col=4)
+err4 <- sum(lsf4$residuals^2)/N
+
+t5 <- (t-mean(time(milk)))^5
+X <- cbind(X,t5)
+lsf5<- lsfit(X,milk)
+lc<- lsf5$coefficients
+yr5 <- lc[1]+ lc[2]*t + lc[3]*t2 +lc[4]*t3+lc[5]*t4+lc[6]*t5
+
+lines(yr5,col=5)
+err5 <- sum(lsf5$residuals^2)/N
+
+t6 <- (t-mean(time(milk)))^6
+X <- cbind(X,t6)
+lsf6<- lsfit(X,milk)
+lc<- lsf6$coefficients
+yr6 <- lc[1]+ lc[2]*t + lc[3]*t2 +lc[4]*t3+lc[5]*t4+lc[6]*t5+lc[7]*t6
+
+lines(yr5,col=5)
+err6 <- sum(lsf6$residuals^2)/N
+
+sprintf("err1:    %7.2f", err1^.5)
+sprintf("err2:    %7.2f", err2^.5)
+sprintf("err3:    %7.2f", err3^.5)
+sprintf("err4:    %7.2f", err4^.5)
+sprintf("err5:    %7.2f", err5^.5)
+sprintf("err6:    %7.2f", err6^.5)
+# Najmniejszy blad wykazuje wielomian st. 6
+
+# Porownajmy graficznie zachowanie wzgledem innych trendow
+plot(ly, main= "Porownanie linii trendow", ylim= c(1620, 1680), xlim= c(2005, 2006), type= "l")
+lines(yr2, col= 2, type= "o") # Wstepny kandydat
+lines(yr3, col= 3, type= "l")
+lines(yr4, col= 4, type= "o")
+lines(yr5, col= 5, type= "l")
+lines(yr6, col= 6, type= "l")
+# Najlepszym kandydatem (najbardziej zblizonym do lowess()) jest yr2 (kolejnym jest yr3)
+# ,ale czy aby na pewno?
+# Chociaz nie widac znacznej poprawy przy wielomianie st. 6, to linia trendu zaczyna sie zblizac do trendu lowess(milk)
+# Czy jest sens rozwazac wielomiany wyzszych stopni niz 6?
+# Sprawdźmy to!
+```
+
+## Badanie sezonowosci
+```{r}
+# Zbadajmy sezonowosc dla yr2
+milk_acf <- acf(milk- yr2, 75)
+milk_acf$acf[11:13]
+sprintf("Max wartosc:    %7.5f", max(milk_acf$acf[3:length(milk_acf$acf)]))
+sprintf("Pozycja:   %7.0f", which.max(milk_acf$acf[3:length(milk_acf$acf)])+2)
+sez <- fSeason(milk, 12)
+
+plot(sez, main= "Wykres sezonowosci", col= 5)
+plot(sez, main= "Wykres sezonowosci (1994- 1998)", col= 5, xlim= c(1994,1998))
+# Pogladowo sprawdzy jeszcze acf() dla yr4 oraz yr6
+acf(milk- yr4, 75)
+acf(milk- yr6, 75)
+# Mozna smialo stwierdzic, ze okresowosc sezonowosci w kazdym przypadku bedzie wynosic 12
+```
+
+## Sprawdzenie resztek
+```{r}
+res <- milk- yr2- sez
+plot(res, main= "Resztki (yr2)")
+# Autokorelacja resztek
+acf(res, 75)
+
+# Wynik obiecujacy, ale moze uda nam sie dobrac lepsza linie trendu, ktora zaskutuje lepszym "wyplaszczeniem"?
+```
+
+## Lepszy kandydat na trend?
+```{r}
+# wykres resztek przy zastosowaniu kolejno st. lowess(milk), 2,3,4,5,6 (przyjmuje ten sam sezon w kazdym przypadku)
+tstls <- acf(milk- lowess(milk)$y- sez, 75)
+tst2 <- acf(res, 75) # milk- yr2- sez
+acf(milk- yr3- sez, 75)
+tst4 <- acf(milk- yr4- sez, 75)
+acf(milk- yr5- sez, 75)
+acf(milk- yr6- sez, 75)
+
+sprintf("Pozycje 63-65 dla resztek z usunieciem trendu lowess(milk):")
+tstls$acf[63:65] # Dla 64 mamy 0.2016578
+sprintf("Pozycje 63-65 dla resztek z usunieciem trendu yr2:")
+tst2$acf[63:65] # Dla 64 mamy 0.2285596
+sprintf("Pozycje 35-37 dla resztek z usunieciem trendu yr4:")
+tst4$acf[35:37] # Dla 36 mamy 0.2314442
+# Wydaje sie jakby wraz ze wzrostem stopnia wielomianu, wzrastala autokorelacja na srodkowych "Lag-ach"
+# Dlatego odrzucamy wielomian st. 6 i wyzsze
+# Finalnie, najlepszym kandydatem na linie trendu jest yr2 jako najbardziej "wyplaszczony" wykres oraz najblizszy linii lowess(milk) (na wczesniejszym wykresie porownania linii trendow), chociaz yr4 rowniez wydaje sie byc atrakcyjny
+```
+
+## Ostateczne wykresy
+```{r}
+plot(milk, main= "Miesieczna produkcja mleka")
+lines(yr2, col= 2)
+
+plot(milk- yr2, main= "Wielkosc roznic miedzy oryginalnymi danymi, a sezonowoscia") # Dane bez trendu
+lines(sez, col= 5) # Sezon
+lines(milk- yr2- sez, col= 2, type= "h")
+# Mozemy dostrzec pewna anomalie (najwiekszy odchyl sezonu od oryginalnych danych) w latach 1999-2001
+# Podzielmy wykres na 3 czesci
+
+sr <- mean(time(milk))
+plot(milk- yr2, main= "Wielkosc roznic miedzy oryginalnymi danymi, a sezonowoscia 1994- 2001", xlim= c(1994,1999)) # Dane bez trendu
+lines(sez, col= 5) # Sezon
+lines(milk- yr2- sez, col= 2, type= "h")
+
+plot(milk- yr2, main= "Wielkosc roznic miedzy oryginalnymi danymi, a sezonowoscia 2001- 2006", xlim= c(2001,2005)) # Dane bez trendu
+lines(sez, col= 5) # Sezon
+lines(milk- yr2- sez, col= 2, type= "h")
+
+plot(milk- yr2, main= "Wielkosc roznic miedzy oryginalnymi danymi, a sezonowoscia 1999- 2001", xlim= c(1999,2001)) # Dane bez trendu
+lines(sez, col= 5) # Sezon
+lines(milk- yr2- sez, col= 2, type= "h")
+
+# Teraz rowniez latwiej zauwazyc, ze na przelomie roku 2000-go, (chwilowo) znacznie wzrosla produkcja mleka
+```
+
+
+## Siła trendu i sezonowości - ciekawostka
+  
+https://otexts.com/fpp3/stlfeatures.html
+
+```{r}
+res <- milk- yr2- sez
+Rt <- var(res)
+Tt <- var(yr2)
+St <- var(sez)
+# Sila trendu
+cat("Sila trendu z przedzialu [0,1]:      ",max(0,1-Rt/(var(yr2+res))),"\n")
+# Sila sezonowosci
+cat("Sila sezonowosci z przedzialu [0,1]: ",max(0,1-Rt/(var(sez-res))),"\n")
+```
+
+Powyższe traktuję jako pewne uświadomomienie na temat siły trendu i sezonowości dla zbioru milk. Jak widać, te siły są bardzo duże. Ta metoda bywa stosowana do wizualizacji sił trendu i sezonowości w przypadku danych z wieloma zmiennymi/kolumnami.
+</details>
+
+## Część II - walidacja modeli wraz z predykcjami
+<details>
+  <summary>Kliknij, aby rozwinąć</summary>
+  
+### Wykorzystanie pakietu "itsmr"
+
+Po ręcznej dekompozycji szeregu czasowego, przejdziemy do wykorzsytania bilbioteki "itsmr" do zbudowania modelu oraz wykonania predykcji.
+
+#### Utworzenie modelu ARMA() z biblioteką "itsmr"
+
+Wykorzystując funkcję acf() oraz pacf() zbadajmy resztki ze zbioru "milk". Pozwoli nam to okreslić dobranie p,q do modelu ARMA(p,q).
+
+```{r, echo=F}
+acf(res, 150)
+pacf <- pacf(res, 150)
+pacf$acf[1:5]
+```
+
+W przypadku autokorelacji, nie ma wyróżniającego się kandydata (Lag-u) dla modelu $MA(q)$. Natomiast w przypadku częściowej autokrelacji (korelogramu) widzimy, że na pierwszej pozycji występuje znaczna istotność ($0.73703561$). Oznacza to, że kandydatami na wartości w modelu $ARMA(p,q)$ będą $p=1, \;q=0\iff ARMA(1,0) \iff AR(1)$. Istotnie, porównajmy zaproponowany model z wynikiem wbudowanej funkcji autofit() z pakietu "itsmr", która sprawdza zadane parametry modelu tak, aby zminimalizować błąd AICc.
+
+```{r, echo=F, warning=FALSE}
+cat("ARMA(1,0)")
+cat("\n")
+itsmr::arma(res, p=1)
+cat("autofit(res)")
+cat("\n")
+autofit(res, p=0:5, q=0:5)
+```
+
+Jak widzimy, w podanym zakresie parametrów model $ARMA(1,0)$ został wybrany jako optymalny. Dodatkowo, wyróżnijmy błąd standardowy współczynnika na niskim poziomie $0.05561624$, który mierzy jak dokładnie model szacuje nieznaną wartość współczynnika. Oczywiście im mniejszy jest błąd standardowy, tym dokładniejsze jest oszacowanie.
+Istotnie, z porównania różnych modeli, widzimy, że model $ARMA(1,0)$ klasuję się najwyżej z AICc na najniższym poziomie: $1151.801$.
+
+```{r, echo=F}
+cat("ARMA(1,0)")
+itsmr::arma(res, p=1, q=0)$aicc
+cat("ARMA(0,1)")
+itsmr::arma(res, p=0, q=1)$aicc
+cat("ARMA(1,1)")
+itsmr::arma(res, p=1, q=1)$aicc
+cat("ARMA(2,0)")
+itsmr::arma(res, p=2, q=0)$aicc
+cat("ARMA(0,2)")
+itsmr::arma(res, p=0, q=2)$aicc
+cat("ARMA(2,1)")
+itsmr::arma(res, p=2, q=1)$aicc
+cat("ARMA(1,2)")
+itsmr::arma(res, p=1, q=2)$aicc
+cat("ARMA(2,2)")
+itsmr::arma(res, p=2, q=2)$aicc
+```
+
+Wniosek? Otrzymane reszty mają strukturę modelu $AR(1)$, tj.: $R_t= 0.7355615 \,R_{t-1}+W_t$ ,gdzie $R_t$ jest składnikiem otrzymanych reszt "res", a $W_t$ jest białym szumem. Przekształcając otrzymany model do $W_t= R_t- 0.7355615 \,R_{t-1}$ widzimy, że możemy łatwo zbadać, czy $W_t$ istotnie jest białym szumem. W tym celu skorzystamy z funkcji diff().
+
+```{r, echo=F}
+Box.test(diff(res, 1))
+acf(diff(res, 1), 150)
+```
+
+P-wartość jest powyżej poziomu istotności ($p-value = 0.07774$). Możemy również przeprowadzić metodę poznaną na wykładzie, aby utworzyć taki szereg ręcznie.
+
+```{r}
+a = itsmr::arma(res, p=1, q=0)
+n = length(res)
+a.ph<-a$phi
+y <- rep(0,n)
+y[1] = res[1]
+for(i in 2:n)
+  y[i] = res[i] -a.ph[1]*res[i-1]
+```
+
+Przeprowadzjąc analogiczny test, mamy:
+
+```{r, echo=F}
+Box.test(y)
+acf(y, 150)
+```
+
+Porównajmy graficznie otrzymane szeregi.
+
+```{r, echo=F}
+par(mfrow=c(2,1))
+plot(diff(res, 1), t='l', main="diff(res, 1)")
+plot(y, t='l', main="y")
+par(mfrow=c(1,1))
+```
+
+Istotnie, struktura (wzrosty i spadki) obu szeregów jest bardzo podobna. Dodatkowo, możemy dostrzec, że pojedyncza anomalia na przełomie milenium, chociaż nadal wystepuje, to nie ma większego wpływu na stacjonarność szeregu.
+
+Zatem możemy przejść do predykcji, wykorzystując model $ARMA(1,0)$ dla "res".
+
+#### Predykcja z wykorzystaniem biblioteki "itsmr"
+
+We wcześniejszych krokach, ustaliliśmy wszystkie niezbędne parametry. Posługując się pakietem "itsmr" oraz zaproponowaną przez twórców metodą, przeprowadzimy predykcję.
+
+```{r}
+M = c("season",12,"trend",2) 
+# Powyższy model odejmuje składnik sezonowy z okresem 12, następnie odejmuje składnik trendu kwadratowego (ustalony sezon wyniósł 12, natomiast ustalony stopień wielomianu trendu wyniósł 2).
+a = arma(res,1,0)
+forecast1 <- itsmr::forecast(milk %>% as.numeric(),M,a,12,2)
+# Funckja forecast() wymaga, aby wprowadzić kolejno:
+# x= zbiór danych w postaci numerycznej (milk %>% as.numeric()- konwertuje szereg czasowy w wektor numeryczny)
+# M= model danych- określenie długości sezonu, postaci trendu+ ewentualne przekształcenia danych, np. z wykorzystaniem log()
+# a= model arma()
+# h= ilość okresów do przewidzenia
+```
+
+Wskaźniki dopasowania policzymy dla predykcji przy podziale danych na treningowe i testowe.
+
+Dodatkowe porównanie metodą graficzną, przy pominięciu ostatniego roku w oryginalnych danych.
+
+```{r, echo=F}
+train1 <- milk[1:132]
+test1 <- milk[133:144]
+MM = c("season",12,"trend",2)
+cat("Wykorzystamy wbudowaną metodę z biblioteki itsmr, do uzyskiwania reszt, tj. funkcję Resid().")
+e = Resid(train1, MM)
+plot.ts(res[1:132], main="Porównanie ręcznie uzyskanych reszt z wynikem funkcji Resid()")
+lines(e, col= 4)
+legend(1,85,legend=c("Reszty uzyskane ręcznie", "Reszty z wykorzystaniem funkcji Resid()"),
+       col=c("black", "blue"), lty=1, cex=0.8)
+aa = arma(e,1,0)
+tst <- itsmr::forecast(train1,MM,aa,12,0)
+plot(test1, t='l', main="Porównanie ostatniego roku oryginalnych danych z predykcją")
+lines(tst$pred, col=4)
+```
+
+Wyraźnie widzimy, że prognoza kieruję się ku dołu. Dzieje się tak za sprawą wybranego trendu. W przypadku wyboru trendu jako np. wielomianu stopnia 5-tego, który ma tendencję do wzrostu, prognoza zaczyna kierować się ku górze. 
+
+Zanim jednak przejdziemy do porównania graficznego, sprawdźmy otrzymane dopasowanie predykcji.
+
+```{r,echo=F}
+err1 <- test1-tst$pred
+me1 <- fabletools::ME(err1)
+cat("ME:    ", me1)
+cat("\n")
+mse1 <- fabletools::MSE(err1)
+cat("MSE:   ", mse1)
+cat("\n")
+rmse1 <- fabletools::RMSE(err1)
+cat("RMSE:  ", rmse1)
+cat("\n")
+mae1 <- fabletools::MAE(err1)
+cat("MAE:   ", mae1)
+cat("\n")
+mpe1 <- fabletools::MAPE(err1, test1)
+cat("MPE:   ", mpe1)
+cat("\n")
+mape1 <- fabletools::MAPE(err1, test1)
+cat("MAPE:  ", mape1)
+cat("\n")
+# Ponieważ szereg jest sezonowy, zatem różnicujemy o długość sezonu
+mase1 <- fabletools::MASE(err1, train1, .period = 12)
+cat("MASE:  ", mase1)
+cat("\n")
+rmsse1 <- fabletools::RMSSE(err1, train1, .period = 12)
+cat("RMSSE: ", rmsse1)
+```
+
+Dopasowanie prognozy po zmianie trendu.
+
+```{r, echo=F}
+MM5 = c("season",12,"trend",5)
+e5 = Resid(train1, MM5)
+aa = arma(e5,1,0)
+tst5 <- itsmr::forecast(train1,MM5,aa,12,0)
+plot(test1, t='l', main="Porównanie ostatniego roku oryginalnych danych z predykcją")
+lines(tst5$pred, col=4)
+```
+
+Możemy zaobserwować, że współczynniki dopasowania predykcji, faktycznie uległy poprawie.
+
+```{r,echo=F}
+me5 <- fabletools::ME(tst5$se)
+cat("ME:    ", me5)
+cat("\n")
+mse5 <- fabletools::MSE(tst5$se)
+cat("MSE:   ", mse5)
+cat("\n")
+rmse5 <- fabletools::RMSE(tst5$se)
+cat("RMSE:  ", rmse5)
+cat("\n")
+mae5 <- fabletools::MAE(tst5$se)
+cat("MAE:   ", mae5)
+cat("\n")
+mpe5 <- fabletools::MAPE(tst5$se, test1)
+cat("MPE:   ", mpe5)
+cat("\n")
+mape5 <- fabletools::MAPE(tst5$se, test1)
+cat("MAPE:  ", mape5)
+cat("\n")
+# Ponieważ szereg jest sezonowy, zatem różnicujemy o długość sezonu
+mase5 <- fabletools::MASE(tst5$se, train1, .period = 12)
+cat("MASE:  ", mase5)
+cat("\n")
+rmsse5 <- fabletools::RMSSE(tst5$se, train1, .period = 12)
+cat("RMSSE: ", rmsse5)
+```
+
+Natomiast nie wolno się tym bezwględnie sugerować. Dopasowanie trendu do predykcji powinno być popratę wiedzą eksperta, który już zna pewne zachowania rynku i byłby w stanie określić, który trend byłby optymalny. My możemy tylko zaproponować kilka modeli o jak najlepszym dopasowaniu.
+
+### Wykorzystanie pakietu "fpp3"
+
+W dalszej części, wypróbujemy metodę zaproponowaną przez Rob'a Hyndman'a, który do konstrukcji modelu ARIMA() wykorzystuje funkcje z bilbiotek "fable" oraz "tsibble", które są zawarte w bilbiotece "fpp3".
+
+#### Model spaceru losowego, czyli alternatywne podejście do sezonowości
+
+Szereg różnicowy jest zmianą pomiędzy kolejnymi obserwacjami w szeregu pierwotnym i może być zapisany jako $y'_t=y_t-y_{t-1}$. Gdy szereg różnicowany jest białym szumem, model dla szeregu pierwotnego można zapisać jako $y_t-y_{t-1} = \varepsilon_t$ gdzie $\varepsilon_t$ oznacza biały szum. Po prostym przekształceniu, otrzymujemy model spaceru losowego: $y_t= y_{t-1}+\varepsilon_t$.
+
+Czasami zróżnicowane dane nie wydają się być stacjonarne i może być konieczne, aby zróżnicować dane po raz drugi, aby uzyskać stacjonarny szereg: $$y''_t= y'_t-y'_{t-1}=(y_t-y_{t-1})-(y_{t-1}-y_{t-2})=y_t-2y_{t-1}+y_{t-2}$$
+Dla dyskretnego szeregu czasowego różnica drugiego rzędu reprezentuje krzywiznę szeregu w danym punkcie czasowym. Jeśli różnica drugiego rzędu jest dodatnia, to szereg czasowy jest zakrzywiony w górę w tym czasie, a jeśli jest ujemna, to szereg czasowy jest zakrzywiony w dół w tym czasie (analogia z drugą pochodną).
+
+Podobnie postepuję się w przypadku różnicowania sezonowego, które jest różnicą między obserwacją a poprzednią obserwacją z tego samego sezonu. Niech $m \in \mathbb{N}$ będzie m-tym sezonem. Wówczas sezonowy szereg różnicowy jest postaci: $y'_t=y_t-y_{t-m}$.
+Przy czym, jeżeli jest on białym szumem, to otrzymujemy model postaci $y_t= y_{t-m}+\varepsilon_t$.
+
+Różnice pierwszego stopnia są zmianą pomiędzy jedną obserwacją a drugą. Różnice sezonowe to zmiana między jednym rokiem a drugim. Inne opóźnienia najprawdopodobniej nie będą miały większego sensu interpretacyjnego i należy ich unikać.
+
+Sprawdźmy to na zbiorze milk, w którym sezonowość jest równa 12. Do przeprowadzenia różnicowania, skorzystamy z funkcji difference() (z pakietu tsibble).
+
+```{r, echo=F}
+plot.ts(difference(milk, 1)[], main="Różnicowanie o lag= 1")
+cat("Brak oczekiwanego skutku")
+roz12 <- ts(difference(milk, 12)[13:144], start= c(1994.5), frequency= 12)
+plot.ts(roz12, main="Różnicowanie o lag= 12 (ustalony wcześniej okres sezonu)")
+acf(difference(milk, 12)[13:144], 150)
+cat("Sukces! Udało się nam otrzymać szereg stacjonarny.\nPotwierdza to ustalony okres sezonowości równy 12.")
+```
+
+Uwaga! Należy pamiętać, że zastosowanie większej liczby różnic niż wymagana spowoduje fałszywą dynamikę lub autokorelacje, które w rzeczywistości nie istnieją w szeregu czasowym. Dlatego wykonujemy tak mało różnic, jak to konieczne, aby uzyskać szereg stacjonarny.
+
+#### Działanie funkcji ARIMA() oraz budowanie niesezonowego modelu
+
+Funkcja ARIMA() z biblioteki "fable" wykorzystuje wariacje algorytmu Hyndman-Khandakar, który łączy w sobie test KPSS wraz z minimalizacją AICc i MLE, aby uzyskać model ARIMA. Dla zainteresowanych, w książce Hyndman-a, w rozdziale 9.7 "ARIMA modelling in fable", autor graficznie przedstawił schemat działania tegoż algorytmu.
+
+Podczas dopasowywania modelu ARIMA do (niesezonowego) szeregu czasowego, klasycznym podejściem jest:
+
+1) Narysowanie wykresu i identyfikacja nietypowych obserwacji.
+
+2) Jeżeli konieczna, transformacja danych dla ustabilizowania wariancji (transoframcja Box'a-Cox'a).
+
+3) Jeżeli szereg jest niestacjonarny, to identyfikacja sezonowości lub pierwsze różnicowanie danych (oba do momentu uzyskania szeregu stacjonarnego).
+
+4) Badanie wykresów ACF/PACF w celu stwierdzenia jaki model będzie odpowiedni (ARIMA(p,d,0) lub ARIMA(0,d,q)).
+
+5) Próba dobrania najlepszego modelu pod względem minimalizacji AICc.
+
+6) Sprawdzenie residuów z wybranego modelu poprzez narysowanie wykresu ACF.
+
+7) Prognoza, pod warunkiem, że residua przypominają biały szum.
+
+Algorytm Hyndman-Khandakar automatyzuje kroki 3-5. Wykorzystajmy tą metodę dla zbioru "milk". Oczywiście, żadna transformacja danych nie jest wymagana.
+
+W pierwszej kolejności konwertujemy dane do postaci akceptowalnej przez funkcję ARIMA(). Następnie wskazujemy kolumnę ze zmiennymi losowymi: "as_tsibble(res) %>% model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(0,0,0)))"
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+fit <- as_tsibble(res) %>% model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(0,0,0)))
+report(fit)
+```
+
+Otrzymaliśmy model ARIMA(1,0,0), tj. Autoregresję dla p= 1. Spróbujemy uzyskać lepszy model poprzez dezaktywację zmiennych optymalizująych działanie funkcji, tj.:
+greedy = F; odpowiadające za wyłączenie natychmiastowego "przeskakiwania" do modeli uzyskujących lepszy wynik,
+approximation = F; odpowiadające za wyłączenie stosowania przybliżeń wyników,
+stepwise = F; odpowiadające za włączenie sprawdzania wszystkich możliwych kombinacji.
+Oczywiście musimy liczyć się ze znacznym spowolnieniem działania.
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+fit_tst <- as_tsibble(res) %>%  model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(0,0,0), greedy = F, approximation = F, stepwise = F))
+report(fit_tst)
+```
+
+Dużą korzyścią dla analityków jest możliwość wywoływania kilku modeli jednoczeście wraz z porównaniem ich wyników. Pakiet "fpp3", a dokładniej funkcja glance() z pakietu "fabletools, która wykorzystuje modele w obrębie mable do utworzenia jednowierszowego podsumowania ich dopasowania, umożliwia nam takie porównanie.
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+res_fit <- as_tsibble(res) %>% model(auto_ARIMA_optymalna = ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(0,0,0)),
+                                     auto_ARIMA_nieoptymalna = ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(0,0,0),
+                                                                     greedy = F, approximation = F, stepwise = F),
+                                     auto_ARIMA_1_0_0 = ARIMA(value ~ pdq(1,0,0)+ PDQ(0,0,0)),
+                                     auto_ARIMA_0_0_1 = ARIMA(value ~ pdq(0,0,1)+ PDQ(0,0,0)),
+                                     auto_ARIMA_1_0_1 = ARIMA(value ~ pdq(1,0,1)+ PDQ(0,0,0)),
+                                     auto_ARIMA_2_0_0 = ARIMA(value ~ pdq(2,0,0)+ PDQ(0,0,0)),
+                                     auto_ARIMA_0_0_2 = ARIMA(value ~ pdq(0,0,2)+ PDQ(0,0,0)),
+                                     auto_ARIMA_2_0_1 = ARIMA(value ~ pdq(2,0,1)+ PDQ(0,0,0)),
+                                     auto_ARIMA_1_0_2 = ARIMA(value ~ pdq(1,0,2)+ PDQ(0,0,0)),
+                                     auto_ARIMA_2_0_2 = ARIMA(value ~ pdq(2,0,2)+ PDQ(0,0,0)))
+glance(res_fit)
+```
+
+Z powyższej tabeli można stwierdzić, że model ARIMA(1,0,0) był lepiej dopasowany. Następnie wykorzystamy wbudowaną funkcję gg_tsresiduals() do wydobycia i zbadania uzyskanych z modelu reszt.
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+fit %>%
+  gg_tsresiduals()
+```
+
+Możemy również wydobyć wartości residuów ręcznie poprzez funkcję stats::residuals(), co pozwoli nam na własnoręczne sprawdzenie uzyskanych reszt.
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+reszty <- stats::residuals(fit)$'.resid'
+plot(res %>% as.numeric(), main = "Porównanie uzyskanych reszt wraz z poprzednimi", t="l")
+lines(reszty, col= 3)
+lines(e, col= 4)
+legend(1,85,legend=c("Reszty uzyskane ręcznie", "Reszty z wykorzystaniem funkcji Resid()", "Reszty uzyskane z modelu ARIMA()"),
+       col=c("black", "blue", "green"), lty=1, cex=0.8)
+TSA::acf(reszty, 150)
+Box.test(reszty)
+```
+
+Dodatkowo, możemy sprawdzić dopasowanie uzyskanego modelu, wykorzystując funkcję fitted() z pakietu "stats".
+
+```{r, echo= F}
+model_reszt <- fitted(fit)$.fitted
+plot(model_reszt, t='l', main="Dopasowanie modelu")
+lines(reszty, col= 3)
+```
+
+Zatem możemy przejść do predykcji. W tym celu wykorzsytamy funckję forecast() z pakietu "fable". Ta funkcja prognozy umożliwia tworzenie przyszłych przewidywań szeregu czasowego na podstawie dopasowanych modeli. Jeśli zmienna zalezna od odpowiedzi została przekształcona w formułe modelu, przekształcenie to zostanie automatycznie przekształcone wstecz. Wszystkie modele Fable z opartą na formułach specyfikacją modelu wspierają wysoce elastyczną specyfikację transformacji. Określone transformacje są automatycznie przekształcane wstecznie i korygowane pod kątem błędu systematycznego w celu uzyskania prognozowanych średnich i dopasowanych wartości w oryginalnej skali danych.
+(https://robjhyndman.com/hyndsight/backtransforming/)
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+fit %>% fabletools::forecast(h=12) %>%
+    autoplot(res)+
+    labs(y = "res (milk)")
+
+fit %>% fabletools::forecast(h=12) %>%
+    autoplot(res)+
+    labs(y = "res (milk)")+
+    coord_cartesian(xlim=c('2005-01-01','2007-01-01'))
+```
+
+Domyślnie, funkcja ARIMA() automatycznie określam czy stała jest wymagana. Dla d= 0 lub d= 1, stała zostanie uwzględniona, jeśli poprawi to wartość AICc. Jeżeli $d > 1$ stała jest zawsze pomijana, ponieważ trend kwadratowy lub wyższego rzędu jest szczególnie niebezpieczny przy prognozowaniu. Oczywiście możemy zmusić model do uwzględnienia bądź zignorowania stałej.
+
+```{r, echo=F}
+cat("ARIMA(value ~ 1 + ... ,gdzie 1 oznacza wymuszenie uwzględnienia stałej")
+fit <- as_tsibble(res) %>%  model(ARIMA(value ~ 1 + pdq(p=0:4, d=0:2, q=0:2)+ PDQ(0,0,0)))
+report(fit)
+cat("ARIMA(value ~ 0 + ... ,gdzie 0 oznacza wymuszenie zignorowania stałej")
+fit <- as_tsibble(res) %>%  model(ARIMA(value ~ 0 + pdq(p=0:4, d=0:2, q=0:2)+ PDQ(0,0,0)))
+report(fit)
+```
+
+Uwaga! Przedziały ufności dla modeli ARIMA opierają się na założeniu, że reszty są nieskorelowane i mają rozkład normalny. Jeżeli którekolwiek z tych założeń nie jest spełnione, wówczas przedziały predykcji mogą być nieprawidłowe. Z tego powodu, zawsze należy sporządzić wykres ACF i histogram reszt w celu sprawdzenia założeń przed sporządzeniem przedziałów ufności.
+
+Jeżeli reszty są nieskorelowane, ale nie mają rozkładu normalnego, to zamiast tego można zastosować Bootstrap (wprowadzone przez Bradleya Efrona metody szacowania rozkładu błędów estymacji, za pomocą wielokrotnego losowania ze zwracaniem z próby. Są przydatne szczególnie, gdy nie jest znana postać rozkładu zmiennej w populacji). Wystarczy do funkcji forecast() dodać "bootstrap=TRUE".
+
+Uzyskaliśmy predykcję, lecz dotyczy ona szeregu stacjonarnego reszt. Aby uzyskać predykcję dla wraz z naniesionym trendem oraz sezonowością, proponuje się wykorzystanie powyżej metody dla całych danych wraz z ewentualnym uprzednim zidentyfikowaniem parametrów modelu.
+
+#### Sezonowy model ARIMA()
+
+W sezonowym modelu ARIMA stosuje się dodatkowo zmienna P,D,Q, dla modelu sezonowego $ARIMA(p,d,q)(P,D,Q)_m$, gdzie $m$ jest liczbą indeksów na sezon (długość sezonu), $(p,d,q)$ jest niesezonową częścią modelu, a $(P,D,Q)$ jest sezonową częścią modelu.
+
+Przykładowy model $ARIMA(1,1,1)(1,1,1)_4$ bez stałej, jest postaci: $$(1-\phi_1B)(1-\Phi_1B^4)(1-B)(1-B^4)y_t=(1+\theta_1B)(1+\Theta_1B^4)\varepsilon_t$$ gdzie:
+
+i) $(1-B^4)$ to różnice sezonowe,
+ii) $(1-B)$ to różnice niesezonowe,
+iii) $(1-\Phi_1B^4)$ to sezonowy model $AR(1)$,
+iv) $(1-\phi_1B)$ to niesezonowy model $AR(1)$,
+v) $(1+\Theta_1B^4)$ to sezonowy model $MA(1)$,
+vi) $(1+\theta_1B)$ to niesezonowy model $MA(1)$.
+
+Wszystkie czynniki można pomnożyć, a ogólny model zapisać w następujący sposób:
+
+$y_t=$
+$=(1+\phi_1)y_{t-1}-\phi_1y_{t-2}+(1+\Phi_1)y_{t-4}-(1+\phi_1+\Phi_1+\phi_1\Phi_1)y_{t-5}+(\phi_1+\phi_1\Phi_1)y_{t-6}-\Phi_1y_{t-8}+(\Phi_1+\phi_1\Phi_1)y_{t-9}-\phi_1\Phi_1y_{t-10}+$
+$+\varepsilon_t+\theta_1\varepsilon_{t-1}+\Theta_1\varepsilon_{t-4}+\theta_1\Theta_1\varepsilon_{t-5}$
+
+W celu wstępnego dobrania współczynników, można wykorzystać funkcje acf() i pacf(). W tym celu stosuje się metodę różnicowania z wykorzystaniem funkcji difference(). Nastepnie analizuje się znaczne wielkości na obu wykresach. Niestety, dla osób dopiero poznających zagadnienie szeregów czasowych (takimi jak ja), może to być zadanie trudne, aby pewnie wskazać odpowiednie parametry. Szczęśliwie, sezonowa wersja modelu ARIMA, podobnie jak w przypadku niesezonowego modelu, ma wbudowany algorytm do automatycznego wskazywania najlepszych współczynników.
+
+```{r}
+fit <- as_tsibble(milk) %>% model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(P=0:4, D=0:2, Q=0:4)))
+report(fit)
+```
+
+Widzimy, że zaproponowana struktura modelu ARIMA, to niesezonowy model AR(1) wraz z sezonowym modelem AR(3), przy jednokrotnym zróżnicowaniu sezonowym danych o 12. Uzyskany model ARIMA wykazuje AICc= 1036.93 < 1151.801 (model itsmr::arma()). Porównajmy uzyskany model z oryginalnymi danymi:
+
+```{r, echo=F}
+plot(milk %>% as.numeric(), t='l', main= "Dopasowanie modelu")
+lines(fitted(fit)$.fitted, col= 4)
+cat("Oczywiście, w wyniku różnicowania o sezon, utraciliśmy początkowe 12 wartości.")
+```
+
+Wydobądźmy resztki z otrzymanego modelu oraz je przetestujmy pod kątem białego szumu.
+
+```{r, echo=F}
+resARIMA <- resid(fit)$.resid
+plot(resARIMA, t='l', main="Resztki z modelu ARIMA(1,0,0)(3,1,0)[12]")
+TSA::acf(resARIMA, 150)
+pacf(resARIMA, 150)
+Box.test(resARIMA)
+```
+
+Otrzymaliśmy biały szum, zatem możemy przejśc do predykcji. Postąpimy analogicznie jak w przypadku reszt. Do wydobycia informacji na temat dopasowania uzyskanej predykcji posłużymy się funkcją accuracy().
+
+```{r, echo=F}
+fit %>% forecast(h=12) %>%
+    autoplot(milk)+
+    labs(y = "milk")
+
+fit %>% forecast(h=12) %>%
+    autoplot(milk)+
+    labs(y = "milk")+
+    coord_cartesian(xlim=c('2005-01-01','2007-01-01'), ylim=c(1500,1850))
+accuracy(fit)
+```
+
+Widzimy, że wystąpiła znaczna poprawa wskaźników predykcji, w przypdaku modelu utworzonego z całych danych.
+
+Dodatkowo, możemy wyciągnąć wartości prognozy poprzez użycie funkcji hilo().
+
+```{r, echo=F}
+predARIMA <- fit %>% fabletools::forecast(h=12) %>% hilo()
+predARIMA
+```
+
+Ponieważ dla pakietu "itsmr" obliczyliśmy dodatkowo wskaźniki predykcji, uprzednio dzieląc model i porównując wynik z oryginalnymi danym, zatem tutaj postąpimy analogicznie.
+
+```{r, echo=F}
+train2 <- as_tsibble(milk)[1:132,]
+test2 <- as_tsibble(milk)[133:144,]
+
+cat("Wskazujemy dobrane parametry, takie jakie funkcja dobrała dla pełnych danych i otrzymujemy model:")
+fittst <- train2 %>% model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:4)+ PDQ(P=0:4, D=0:2, Q=0:4)))
+report(fittst)
+
+fittst %>% forecast(h=12) %>%
+    autoplot(train2)+
+    labs(y = "milk[1:132]")
+
+fittst %>% forecast(h=12) %>%
+    autoplot(train2)+
+    labs(y = "milk[1:132]")+
+    coord_cartesian(xlim=c('2005-01-01','2006-01-01'), ylim=c(1500,1800))
+
+accuracy(fittst)
+```
+
+### Wykorzystanie pakietu "bsts"
+
+Wychodząc naprzeciw modelowi ARIMA, który jest rozszerzeniem modelu ARMA, wykorzystamy zupełnie inne podejście do prognozowania, mianowicie wykorzystamy Bayesowski strukturalny model szeregów czasowych. W tym celu wykorzystamy bibliotekę "bsts". Swoje poczynania opierałem o artykuł twórców tej bilbioteki (https://www.unofficialgoogledatascience.com/2017/07/fitting-bayesian-structural-time-series.html).
+
+#### Generalny opis
+
+Model składa się z trzech głównych elementów:
+
+i) Filtru Kalmana- technika dekompozycji szeregów czasowych. W tym kroku badacz może dodać różne zmienne stanu: trend, sezonowość, regresję i inne.
+
+ii) Metoda spike-and-slab- w tym kroku wybierane są najważniejsze predyktory regresji.
+Bayesowskie uśrednianie modeli. Łączenie wyników i obliczanie predykcji.
+
+iii) Model może być użyty do odkrycia związków przyczynowych z jego kontrfaktyczną predykcją i obserwowanymi danymi.
+
+Możliwą wadą modelu może być jego stosunkowo skomplikowane podłoże matematyczne i trudna implementacja w postaci programu komputerowego. Jednak język programowania R posiada gotowe do użycia pakiety do obliczania modelu BSTS, które nie wymagają od badacza silnego zaplecza matematycznego. Paradoksalnie może być bardziej przejrzysta niż modele ARIMA. Jest ona bardziej przejrzysta, ponieważ jej reprezentacja nie opiera się na różnicach, opóźnieniach i średnich ruchomych. Można wizualnie sprawdzić podstawowe komponenty modelu. Model ten lepiej radzi sobie z niepewnością, ponieważ można określić niepewność następczą poszczególnych składowych, kontrolować wariancję składowych i narzucić wcześniejsze przekonania na model. Wreszcie, co nie mniej ważne, każdy model ARIMA może być przekształcony jako model strukturalny.
+
+#### Bayesowski strukturalny model szeregu czasowego  
+
+Strukturalny model szeregów czasowych jest zdefiniowany przez dwa równania. Równanie obserwacji odnosi obserwowane dane $y_t$ do wektora zmiennych ukrytych $\alpha_t$ zwanych "stanem". Stąd $$y_t=Z^T_t\alpha_t+\epsilon_t$$ Równanie przejścia opisuje, w jaki sposób stan utajony zmienia się w czasie. $$\alpha_{t+1}=T_t\alpha_t+R_t\eta_t$$ Składowe błędu $\epsilon_t$ i $\eta_t$ są gaussowskie i niezależne od wszystkiego innego. Tablice $Z_t$ , $T_t$ i $R_t$ są parametrami strukturalnymi. Mogą one zawierać parametry w sensie statystycznym, ale często zawierają po prostu strategicznie rozmieszczone zer i jedynek wskazujące, które bity $\alpha_t$ są istotne dla danego obliczenia.
+
+Najprostszym użytecznym modelem jest "model poziomu lokalnego", w którym wektor $\alpha_t$ jest po prostu skalarem $\mu_t$. Model poziomu lokalnego to losowy spacer obserwowany w szumie $$y_t = \mu_t + \epsilon_t$$ $$\mu_{t+1} = \mu_t + \eta_t$$
+Tutaj $\alpha_t = \mu_t$, a $Z_t$, $T_t$ i $R_t$ mają wartość skalarną 1. Podobnie jak hierarchiczne modele Bayesa dla danych zagnieżdżonych, model poziomu lokalnego jest kompromisem pomiędzy dwoma skrajnościami. Kompromis ten jest określony przez wariancje $\epsilon_t \sim N(0, \sigma^2)$ i $\eta_t \sim N(0,\tau^2)$. Jeżeli $\tau^2 = 0$ to $\mu_t$ jest stałą, więc dane są szumem gaussowskim i.i.d. . W takim przypadku najlepszym estymatorem $y_{t+1}$ jest średnia z $y_1, \dots, y_t$ i odwrotnie, jeśli $\sigma^2=0$ to dane są losowe, w tym przypadku najlepszym estymatorem $y_{t+1}$ jest $y_t$.
+
+Przejdźmy do utworzenia modelu dla danych "milk". W przypadku tworzenia modelu ARIMA, należało przekonwertować dane do postaci tabeli "tsibble". W tym przypadku, musimy przygotowac dane poprzez przekształcenie ich do postaci tabeli "zoo". W tym celu wykorzystamy funkcję as.zoo() z bilbioteki "zoo".
+
+```{r, echo=F}
+milkzoo <- milk %>% as.zoo()
+milkzoo %>% head(18)
+```
+
+Ponieważ mamy do czynienia ze stosunkowo nieskomplikowanymi danymi, zatem model poziomu lokalnego jest całkowicie wystarczający. Przejdźmy do jego skonstruowania.
+
+Działanie tej metody wymaga utworzenia listy do której dodajemy kolejne modele takie jak trend, sezonowość, zmienne zewnętrzne.
+
+```{r}
+ss <- list()
+ss <- AddLocalLinearTrend(ss, milkzoo$milk)
+ss <- AddSeasonal(ss, milkzoo$milk, nseasons = 12, season.duration = 1)
+```
+
+Do obliczenia rozkładu naszego szeregu, pakiet "bsts" wykorzystuje algorytm Gibbs'a (Gibbs sampling). W statystyce próbkowanie Gibbsa lub próbnik Gibbsa jest algorytmem łańcucha Markowa Monte Carlo (MCMC) służącym do uzyskiwania sekwencji obserwacji, które są aproksymowane z określonego wielowymiarowego rozkładu prawdopodobieństwa, gdy bezpośrednie próbkowanie jest trudne. Sekwencja ta może być wykorzystana do aproksymacji wspólnego rozkładu (np. do wygenerowania histogramu rozkładu); do aproksymacji rozkładu krańcowego jednej ze zmiennych lub pewnego podzbioru zmiennych (np. nieznanych parametrów lub zmiennych ukrytych); lub do obliczenia całki (np. wartości oczekiwanej jednej ze zmiennych).
+
+```{r}
+model1 <- bsts(milkzoo$milk,
+               state.specification = ss,
+               niter = 1e3)
+```
+
+Sprwadźmy jakie komponenty ma nasz model. Możemy spróbować ręcznie wyciągnąć składniki.
+
+```{r}
+trend <- model1$state.contributions[,"trend",] %>% as.table() %>% as.data.frame() %>% dplyr::select(Freq)
+sezon <- model1$state.contributions[,"seasonal.12.1",] %>% as.table() %>% as.data.frame() %>% dplyr::select(Freq)
+```
+
+Natomiast pojawia się pewien problem. Ponieważ dokonaliśmy 1000-krotnej iteracji, aby otrzymać rozkład naszego szeregu, zatem ilość składników trendu oraz sezonowości będą 1000-krotnie powiększona.
+
+```{r, echo=F}
+cat("Liczba składników trendu:      ", length(trend[,1]))
+cat("Liczba składników sezonowości: ", length(sezon[,1]))
+```
+
+W celu graficznej analizy modelu jak i jego składników, twórcy biblioteki "bsts" utworzyli funkcje plot.bst(), która w prosty sposób pozwala zwizualizowac otrzymane rezultaty jak i przyszłe predykcje.
+
+```{r, echo=F}
+plot.bsts(model1)
+```
+
+Niebiskie punkty odpowiadają zaobserwowanym danym, natomiast ciemny zarys odpowiada dobranemu rozkładowi.
+
+```{r, echo=F}
+plot(model1, "components")
+```
+
+Aby sprawdzić wszystkie możliwe wizualizacje, należy skorzystać z formuły: plot('nazwa modelu', "help"). Przejdźmy do predykcji.
+
+```{r, echo=F}
+pred1 <- predict(model1, horizon = 12)
+plot(pred1, plot.original = 156)
+plot(pred1, plot.original = 24)
+```
+
+Składniki dopasowania predykcji uzyskamy ręcznie poprzez podzielenie danych na część treningową i testową.
+
+```{r, echo=F}
+l = 132
+h = 12
+train2 <- milkzoo$milk[1:l]
+test2 <- milkzoo$milk[l+1:h]
+ss2 <- list()
+ss2 <- AddLocalLinearTrend(ss2, train2)
+ss2 <- AddSeasonal(ss2, train2, nseasons = 12, season.duration = 1)
+model2 <- bsts(train2,
+               state.specification = ss2,
+               niter = 1000)
+
+pred2 <- predict(model2, horizon = 12)
+plot(pred2, plot.original = 156)
+plot(pred2, plot.original = 24)
+
+err2 <- test2-pred2$mean
+me2 <- fabletools::ME(err2)
+cat("ME:    ", me2)
+cat("\n")
+mse2 <- fabletools::MSE(err2)
+cat("MSE:   ", mse2)
+cat("\n")
+rmse2 <- fabletools::RMSE(err2)
+cat("RMSE:  ", rmse2)
+cat("\n")
+mae2 <- fabletools::MAE(err2)
+cat("MAE:   ", mae2)
+cat("\n")
+mpe2 <- fabletools::MAPE(err2, test2)
+cat("MPE:   ", mpe2)
+cat("\n")
+mape2 <- fabletools::MAPE(err2, test2)
+cat("MAPE:  ", mape2)
+cat("\n")
+# Ponieważ szereg jest sezonowy, zatem różnicujemy o długość sezonu
+mase2 <- fabletools::MASE(err2, train2, .period = 12)
+cat("MASE:  ", mase2)
+cat("\n")
+rmsse2 <- fabletools::RMSSE(err2, train2, .period = 12)
+cat("RMSSE: ", rmsse2)
+```
+
+### Finalne porównanie
+
+Porównajmy rezultaty z dokładności predykcji każdego z modeli w oparciu o podział na część treningową i testową.
+
+```{r, echo=F}
+cat("Wskaźnik:          ARMA(itsmr):          ARIMA(fpp3):          BSTS(bsts):")
+cat("\n")
+cat("ME                ",me1,"            ",accuracy(fittst)$ME,"          ",me2)
+cat("\n")
+cat("MSE               ",mse1,"            ",(accuracy(fittst)$RMSE)^2,"            ",mse2)
+cat("\n")
+cat("RMSE              ",rmse1,"            ",accuracy(fittst)$RMSE,"            ",rmse2)
+cat("\n")
+cat("MAE               ",mae1,"            ",accuracy(fittst)$MAE,"             ",mae2)
+cat("\n")
+cat("MPE               ",mpe1,"            ",accuracy(fittst)$MPE,"         ",mpe2)
+cat("\n")
+cat("MAPE              ",mape1,"            ",accuracy(fittst)$MAPE,"           ",mape2)
+cat("\n")
+cat("MASE              ",mase1,"            ",accuracy(fittst)$MASE,"           ",mase2)
+cat("\n")
+cat("RMSSE             ",rmsse1,"            ",accuracy(fittst)$RMSSE,"           ",rmsse2)
+```
+
+Finalne porównanie wizualne.
+
+```{r, echo=F}
+plot(milk[133:144], t='l', main="Porównanie otrzymanych predykcji dla ostatniego roku", ylim= c(1520,1775))
+lines(tst$pred, col=4)
+lines(predARIMA$.mean, col=3)
+lines(pred2$mean, col= 6)
+legend(9,1775,legend=c("Oryginalne dane", "ARMA", "ARIMA", "BSTS"),
+       col=c("black", "blue", "green", "violet"), lty=1, cex=0.8)
+```
+</details>
+
+### Dodatek - Prophet
+<details>
+  <summary>Kliknij, aby rozwinąć</summary>
+  
+Biblioteka "prophet" został utworzony przez grupę data scientist-ów z zespołu Facebook-a. Prophet jest procedurą prognozowania danych szeregów czasowych opartą na modelu addytywnym, w którym nieliniowe trendy są dopasowywane do rocznej, tygodniowej i dziennej oraz tkz. efekty wakacyjne (holiday effects). Najlepiej sprawdza się w przypadku szeregów czasowych, które mają silne efekty sezonowe i kilka sezonów danych historycznych. Prophet jest odporny na brak danych i przesunięcia w trendzie i zazwyczaj dobrze radzi sobie z wartościami odstającymi. Jest to procedura wysoce zautomatyzowana i radząca sobie z wieloma typowymi problemami związanymi z utworzeniem odpowiedniego modelu, przy tym jest też bardzo przystępnie skonstruowana.
+
+Z uwagi, że jest to bardzo rozległa metoda, dlatego chciałem ją wprowadzić jako dodatek. Dodatkową jej zaletą jest jej ogromna plastyczności i przejrzystość.
+
+#### Budowa modelu
+
+Skonstruujmy model dla naszych danych ze zbioru "milk".
+
+Zaczniemy od odpowiedniego przygotowania formatu tabeli. Funkcja prophet() wymaga od nas tabeli typu data.frame() wraz ze wskazaniem kolumny dat oznaczonej jako "ds" oraz kolumny wartości oznaczonej jako "y". W tym celu sztucznie wygenerujemy kolumnę dat i połączymy z wartościami ze zbioru "milk".
+
+```{r, echo=F}
+data <- seq(as.Date("1994-01-01"), by = "months", length.out = 12^2)
+data %>% head(18)
+df <- cbind(data, milk %>% as.data.frame()) %>% rename(ds = data, y = milk)
+df %>% head(18)
+```
+
+Nastepnie użyjemy standardowej procedury tworzenia modelu i jego przewidywania. Tutaj należy uważać na dobieranie parametrów. Mimo, że można użyć funkcji prophet() do dopasowania danych miesięcznych, to model bazowy jest ciągły (dziennie). Oznacza to, że możemy otrzymać dziwnie zachowujące się wyniki, jeśli dopasujemy model do danych miesięcznych, a następnie wygenerujemy prognozy dzienne. 
+
+```{r}
+m <- prophet(df, yearly.seasonality = T, weekly.seasonality=T, daily.seasonality=T)
+future <- make_future_dataframe(m, periods = 12, freq="month")
+forecastProph <- predict(m, future)
+tail(forecastProph[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')], 12)
+```
+
+Z powyższego otrzymaliśmy gotowy model wraz z wykresami jego komponentów ()
+
+```{r, echo=F, warning=F}
+cat("Uwaga: Jeżeli drugi wykres się nie pojawia, należy 'przeklikać' okno przeglądarki.")
+prophet_plot_components(m, forecastProph)
+dyplot.prophet(m, forecastProph)
+```
+
+```{r, echo=F}
+dftst <- df[1:133,]
+mtst <- prophet(dftst, yearly.seasonality = T, weekly.seasonality=TRUE, daily.seasonality=TRUE)
+futuretst <- make_future_dataframe(mtst, periods = 12, freq="month")
+forecastProphtst <- predict(mtst, futuretst)
+
+err3 <- milk[133:144]-forecastProphtst$yhat[133:144]
+me3 <- fabletools::ME(err3)
+mse3 <- fabletools::MSE(err3)
+rmse3 <- fabletools::RMSE(err3)
+mae3 <- fabletools::MAE(err3)
+mpe3 <- fabletools::MAPE(err3, milk[133:144])
+mape3 <- fabletools::MAPE(err3, milk[133:144])
+# Ponieważ szereg jest sezonowy, zatem różnicujemy o długość sezonu
+mase3 <- fabletools::MASE(err3, milk[1:132], .period = 12)
+rmsse3 <- fabletools::RMSSE(err3, milk[1:132], .period = 12)
+```
+
+#### Finalne porównanie (+dodatek)
+
+```{r, echo=F}
+cat("Wskaźnik:          ARMA(itsmr):          ARIMA(fpp3):          BSTS(bsts):          Prophet(prophet):")
+cat("\n")
+cat("ME                ",me1,"            ",accuracy(fittst)$ME,"          ",me2,"           ",me3)
+cat("\n")
+cat("MSE               ",mse1,"            ",(accuracy(fittst)$RMSE)^2,"            ",mse2,"           ",mse3)
+cat("\n")
+cat("RMSE              ",rmse1,"            ",accuracy(fittst)$RMSE,"            ",rmse2,"           ",rmse3)
+cat("\n")
+cat("MAE               ",mae1,"            ",accuracy(fittst)$MAE,"             ",mae2,"           ",mae3)
+cat("\n")
+cat("MPE               ",mpe1,"            ",accuracy(fittst)$MPE,"         ",mpe2,"           ",mpe3)
+cat("\n")
+cat("MAPE              ",mape1,"            ",accuracy(fittst)$MAPE,"           ",mape2,"           ",mape3)
+cat("\n")
+cat("MASE              ",mase1,"            ",accuracy(fittst)$MASE,"           ",mase2,"           ",mase3)
+cat("\n")
+cat("RMSSE             ",rmsse1,"            ",accuracy(fittst)$RMSSE,"           ",rmsse2,"           ",rmsse3)
+```
+
+```{r, echo=F}
+plot(milk[133:144], t='l', main="Porównanie otrzymanych predykcji dla ostatniego roku", ylim= c(1520,1775))
+lines(tst$pred, col=4)
+lines(predARIMA$.mean, col=3)
+lines(pred2$mean, col= 6)
+lines(forecastProphtst$yhat[133:144], col=2)
+legend(9,1775,legend=c("Oryginalne dane", "ARMA", "ARIMA", "BSTS", "Prophet"),
+       col=c("black", "blue", "green", "violet", "red"), lty=1, cex=0.8)
+```
+</details>
+
+#### Podsumowanie
+<details>
+  <summary>Kliknij, aby rozwinąć</summary>
+
+Nie każdy pakiet w swoich metodach podaje jawnie wartości dopasowania modelu. Natomiast udało nam się, z każdej zaproponowanej metody, wyciągnąć dopasowanie predykcji, poprzez podział zbioru na treningowy oraz testowy.
+
+Sugerując się uzyskanymi wartościami wskaźników dopasowania oraz graficznym porównaniem, możemy łatwo stwierdzić, że najlepszy wynik uzyskał model ARIMA z pakietu fpp3.
+
+W przypadku modelu ARMA z pakietu itsmr, uzyskał on porównywalne wyniki z pakietami wysoce zautomatyzowanymi i powszechnymi.
+
+Warto podkreślić, że badane dane, były średnimi miesięcznymi. W takim przypadku, pakiety "bsts" oraz "prophet", które skupiają się bardziej na szeregach z danych dziennych, w swojej "domyślnej" konfiguracji, sprawują się wyraźnie gorzej niż byśmy sobie tego życzyli.
+
+Zapewne istnieją sposoby lepszego dopasowania tych dwóch metod poprzez dodanie odpowiednich zmiennych do funkcji, natomiast wydaje się, że prostszym rozwiązaniem jest utworzenie modelu ARIMA.
+
+Finalny wniosek jest następujący: W pierwszej kolejności należy zapoznać się z danymi i wstępnie określić jaki model będzie wykazywał najlepsze dopasowanie i predykcję (w zależności jakie wbudowane algorytmy on stosuje). W tym celu, ręczna dekompozycja, jest jak najbardziej wskazana. Po utworzeniu modelu i uzyskaniu zadowalającego dopasowania (wraz z predykcją), możemy przejść do kontrprzykładów z wykorzystaniem innych modeli. Dodatkowo możemy starać się poprawić zachowanie naszego modelu poprzez przekształcenie danych z wykorzystaniem np. logarytmu lub metody Box'a Cox'a, czy też odpowiednie w pakietach funkcję. Finalne porównanie metod powinno odbywać się w opraciu o modele o różnych podejściach do problemu oraz o dodatkową wiedzę ekspercką.
+</details>
+
+

@@ -1,0 +1,487 @@
+---
+title: "ARIMA by Rob J Hyndman"
+author: "Bartosz L."
+date: "7 05 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fpp3) # Hyndmann
+library(fma) # Hyndman zbiory
+library(astsa) # zbiór speech
+library(tsibbledata) # zbiór globa_economy
+
+fSeason<-function(x,s){    #średnia z x w okresie s
+  n<-length(x); N<-floor(n/s)
+  d<-frequency(x)
+  ww<-rep(0,s)    #do liczenia średnich - na początek "0"
+  for(k in 1:s){
+    div = N
+    for(j in 0:(N-1)){
+      ww[k] <- ww[k]+x[k+j*s]
+    }
+    if (k+N*s<=n){                #jeszcze 1 składnik "na końcu"
+      div = N+1
+      ww[k] <- ww[k]+x[k+N*s]
+    }
+    ww[k] <- ww[k]/div
+  }
+  ss <- ww-mean(ww)   #to jest 1 sezon, usuwamy średnią (stałą)
+  for(k in (s+1):n) 
+    ss[k]=ss[k-s]
+  xs<-ts(ss, start=start(x), frequency=d)
+}
+xffc<-function(ffx,t,cc){    # ffx = fft(.ts.)........... wynik = ts(.fft.)     transformata odwrotna - współczyniki wskazane przez cc
+  n = length(ffx)
+  val=0
+  for(i in cc){     #1:100  4,5,6,7,3
+    val = val+Re(ffx[i+1])*cos(2*pi*i*t/n)-Im(ffx[i+1])*sin(2*pi*i*t/n)
+  }
+  val<-(Re(ffx[1])+2*val)/n  #ffx[1]=a[0]
+}
+```
+
+```{r, Przygotowanie danych, include=FALSE}
+google_stock <- gafa_stock %>%
+  filter(Symbol == "GOOG", year(Date) >= 2015) %>%
+  mutate(day = row_number()) %>%
+  update_tsibble(index = day, regular = TRUE)
+# Filter the year of interest
+google_2015 <- google_stock %>% filter(year(Date) == 2015)
+```
+
+Z książki "Forecasting: Principles and Practice" pozwoliłem sobie wybrać najistotniejsze (moim okiem) informacje z rozdziału 9-tego "ARIMA models".
+
+Przypomnę stacjonarność- Stacjonarny szereg czasowy to taki, którego właściwości statystyczne nie zależą od czasu, w którym szereg jest obserwowany.
+
+Niektóre przypadki mogą być mylące - szereg czasowy z zachowaniem cyklicznym (ale bez trendu lub sezonowości) jest stacjonarny. Dzieje się tak dlatego, że cykle nie mają stałej długości, więc przed obserwacją szeregu nie możemy być pewni, gdzie będą szczyty i przełomy cykli.
+
+Dla porównania, wywołam trzy szeregi czasowe.
+
+```{r, fig.height = 8, fig.width = 10, echo=FALSE}
+par(mfrow=c(3,1))
+plot.ts(google_2015$Close, main= "i)  Cena zamknięcia akcji Google w 2015 r.") #Cena zamknięcia- to cena po jakiej w sesji giełdowej inwestorzy zawarli ostatnią transakcję lub kilka ostatnich transakcji na danym instrumencie
+plot.ts(hsales, main= "ii) Sprzedaż domów w USA") #Miesięczna sprzedaż nowych domów jednorodzinnych sprzedawanych w USA
+plot.ts(lynx, main= "iii) Schwytane rysie w Kanadzie") #Roczna łączna ilość futer z rysia kanadyjskiego sprzedawanych przez Hudson Bay Company
+```
+
+W i) możemy dostrzec trend, natomiast w ii) występuje pewna zauważalna sezonowość. Zatem te szeregi czasowe nie są stacjonarne.
+Na pierwszy rzut oka może się wydawać, że silne cykle w szeregu czasowym "Lynx" czynią go niestacjonarnym. Jednak cykle te są aperiodyczne - powstają, gdy populacja rysia staje się zbyt duża w stosunku do dostępnego pokarmu, przez co przestaje się on rozmnażać, a liczebność populacji spada do niskiego poziomu, po czym regeneracja źródeł pokarmu pozwala na ponowny wzrost liczebności populacji, i tak dalej. W dłuższej perspektywie czasowej nie da się przewidzieć przebiegu tych cykli. Dlatego też szereg czasowy jest stacjonarny.
+
+Potwierdźmy nasze podejrzenia za pomocą funkcji acf()
+```{r, echo=F, fig.height = 5, fig.width = 8}
+TSA::acf(google_2015$Close, length(google_2015$Close))
+TSA::acf(hsales, length(hsales))
+TSA::acf(lynx, length(lynx))$acf[5:15]
+
+lynxbezT <- lynx-lowess(lynx)$y
+lynxS <- fSeason(lynxbezT, 29)
+lynxtst <- lynx- lowess(lynx)$y- lynxS
+TSA::acf(lynxtst, length(lynxtst))
+plot(lynxS)
+plot(lynxtst)
+```
+
+Wychodzi na to, że w zbiorze "lynx" jednak pojawia się jakiś efekt sezonowości, ale skoro opis zbioru wskazuje na brak ustalonej długosci sezonu (karmienie rysi przy ich określonej populacji), a na uzależnienie od panującej sytuacji, to czy jest to faktyczna sezonowość? Skoro zostało ustalone, że jest to cykliczność, to jak precyzyjnie okreslić kiedy mamy do czynienia z czym? ... do zastanowienia
+
+Ponieważ zajmowałem się zbiorem TSA::milk, dlatego też dalsze rozważania będe przeprowadzał na nim.
+
+```{r, include=F}
+library(TSA)
+data(milk)
+ly <- lowess(milk)
+t <- time(milk)
+N <- milk %>% length()
+
+X <- matrix(t)
+lsf1<- lsfit(X,milk)
+lc<- lsf1$coefficients
+yr1 <- lc[1]+ lc[2]*t
+
+t2 <- (t-mean(time(milk)))^2
+X <- cbind(X,t2)
+lsf2<- lsfit(X,milk)
+lc<- lsf2$coefficients
+yr2 <- lc[1]+ lc[2]*t + lc[3]*t2
+
+sez <- fSeason(milk, 12)
+res <- milk- yr2- sez
+```
+
+
+# Model spaceru losowego, czyli alternatywne podejście do sezonowości
+
+Szereg różnicowy jest zmianą pomiędzy kolejnymi obserwacjami w szeregu pierwotnym i może być zapisany jako $y'_t=y_t-y_{t-1}$. Gdy szereg różnicowany jest białym szumem, model dla szeregu pierwotnego można zapisać jako $y_t-y_{t-1} = \varepsilon_t$ gdzie $\varepsilon_t$ oznacza biały szum. Po prostym przekształceniu, otrzymujemy model spaceru losowego: $y_t= y_{t-1}+\varepsilon_t$.
+
+Czasami zróżnicowane dane nie wydają się być stacjonarne i może być konieczne, aby zróżnicować dane po raz drugi, aby uzyskać stacjonarny szereg: $$y''_t= y'_t-y'_{t-1}=(y_t-y_{t-1})-(y_{t-1}-y_{t-2})=y_t-2y_{t-1}+y_{t-2}$$
+Dla dyskretnego szeregu czasowego różnica drugiego rzędu reprezentuje krzywiznę szeregu w danym punkcie czasowym. Jeśli różnica drugiego rzędu jest dodatnia, to szereg czasowy jest zakrzywiony w górę w tym czasie, a jeśli jest ujemna, to szereg czasowy jest zakrzywiony w dół w tym czasie (analogia z drugą pochodną).
+
+Podobnie postepuję się w przypadku różnicowania sezonowego, które jest różnicą między obserwacją a poprzednią obserwacją z tego samego sezonu. Niech $m \in \mathbb{N}$ będzie m-tym sezonem. Wówczas sezonowy szereg różnicowy jest postaci: $y'_t=y_t-y_{t-m}$.
+Przy czym, jeżeli jest on białym szumem, to otrzymujemy model postaci $y_t= y_{t-m}+\varepsilon_t$.
+
+Różnice pierwszego stopnia są zmianą pomiędzy jedną obserwacją a drugą. Różnice sezonowe to zmiana między jednym rokiem a drugim. Inne opóźnienia najprawdopodobniej nie będą miały większego sensu interpretacyjnego i należy ich unikać.
+
+Sprawdźmy to na zbiorze milk, w którym sezonowość jest równa 12. Do przeprowadzenia różnicowania, skorzystamy z funkcji difference() (z pakietu tsibble).
+
+```{r, fig.width = 10, echo=F}
+plot.ts(milk-yr2, main="Oryginalne dane bez trendu")
+plot.ts(difference(milk, 1)[], main="Różnicowanie o lag= 1")
+print("Brak jakiegokolwiek skutku")
+roz12 <- ts(difference(milk, 12)[13:144], start= c(1994.5), frequency= 12)
+plot.ts(roz12, main="Różnicowanie o lag= 12 (ustalony wcześniej okres sezonu)")
+acf(difference(milk, 12)[13:144], 100)
+cat("Sukces! Udało się nam otrzymać szereg stacjonarny.\nPotwierdza to ustalony okres sezonowości równy 12.")
+cat("Dla porównania, poprzednio ustalony stacjonarny szereg residuów")
+plot.ts(res, main="Ustalone wcześniej Residua")
+acf(res, 100)
+```
+
+Uwaga! Należy pamiętać, że zastosowanie większej liczby różnic niż wymagana spowoduje fałszywą dynamikę lub autokorelacje, które w rzeczywistości nie istnieją w szeregu czasowym. Dlatego wykonaj tak mało różnic, jak to konieczne, aby uzyskać szereg stacjonarny.
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+plot.ts(difference(difference(milk, 12)[],1)[], main="Dwukrotnie różnicowanie (o lag= 12, a następnie o lag= 1)")
+acfDIFF <- acf(difference(difference(milk, 12)[],1)[14:144], 100)
+acfDIFF$acf[45:50]
+```
+Istotnie, ponowne zróżnicowanie doprowadziło do wskazania autokorelacji na pozycji 48 równej 0.384970139.
+
+# Test KPSS
+
+Test KPSS (od nazwisk Kwiatkowski–Phillips–Schmidt–Shin), wywoływany funkcją unitroot_kpss(), jest testem statystycznym sprawdzającym hipotezę zerową o stacjonarności szeregu czasowego (niestety statystyka testu KPSS ma złożoną konstrukcję oraz bardzo skomplikowany rozkład prawdopodobieostwa i nie jestem w stanie ich przywołać z pełnym zrozumieniem).
+
+Możemy również wykorzystac ten test, aby określić potrzebną ilość różnicowania danych. Proces wykorzystania sekwencji testów KPSS do wyznaczenia odpowiedniej liczby dla pierwszych różnic realizowany jest za pomocą unitroot_ndiffs().
+
+Możemy również określić, czy wymagane jest różnicowanie sezonowe. W tym celu możemy użyć funkcji unitroot_nsdiffs(). Wykorzystuje ona pomiar siły sezonowości zdefiniowanej wzorem $$F_S=max\left(0,1-\frac{Var(\varepsilon_t)}{Var(S_t+\varepsilon_t)}\right) \quad ,dla \;\; F_S\in[0,1]$$ gdzie jeżeli $F_S<0.64$, to nie jest wymagane różnicowanie sezonowe. 
+
+Przykładowe zastosowanie na zbiorze "milk":
+```{r, echo=F}
+# Wymagane jest, aby przekonwertować zbiór do postaci 'tsibble'. W tym celu wystarczy posłużyć się funkcją as_tsibble()
+cat("Test na stacjonarność szeregu milk")
+unitroot_kpss(as_tsibble(milk)$value)
+cat("p-value = 0.010000 < 0.05 zatem odrzucamy hipotezę zerową o stacjonarności szeregu")
+cat("\n")
+cat("Test na stacjonarność szeregu res (milk)")
+unitroot_kpss(as_tsibble(res)$value)
+cat("p-value = 0.10000 > 0.05 zatem nie ma podstaw do odrzucenia hipotezy zerowej")
+cat("\n")
+cat("Liczba potrzebnych pierwszych różnic dla zbioru milk wynosi: ")
+unitroot_ndiffs(as_tsibble(milk)$value)
+cat("\n")
+cat("Liczba potrzebnych pierwszych różnic dla zbioru res wynosi: ")
+unitroot_ndiffs(as_tsibble(res)$value)
+cat("\n")
+cat("Liczba potrzebnych różnic sezonowych dla zbioru milk wynosi: ")
+unitroot_nsdiffs(as_tsibble(milk)$value)
+cat("\n")
+cat("Liczba potrzebnych różnic sezonowych dla zbioru res wynosi: ")
+unitroot_nsdiffs(as_tsibble(res)$value)
+```
+
+# Operator przesunięcia wstecznego
+
+Operator przesunięcia wstecznego definiujemy $$By_t=y_{t-1}$$ W przypadku podwójnego zastosowania mamy $$B(By_t)=B^2y_t=y_{t-2}$$ Przykładowo, jeżeli pragniemy wskazać obecny miesiąc dokładnie rok wcześniej, możemu użyć notacji $B^{12}y_t=y_{t-12}$.
+
+Za pomocą operatora przesunięcia wstecznego, możemy zapisać szereg różnicowy. Różnice pierwszego stopnia możemy zapisać jako: $$y'_t=y_t-y_{t-1}=y_t-By_t=(1-B)y_t$$ czyli różnica może być reprezentowana przez $(1-B)$.
+
+W przypadku różnicy drugiego stopnia mamy: $$y''_t=y_t-2y_{t-1}+y_{t-2}=(1-2B+B^2)y_t=(1-B)^2y_t$$ W ogólnym przypadku możemy zapisać różnicę $d-tego$ stopnia jako $(1-B)^dy_t$.
+
+# Model Autoregresjii
+
+Model autoregresjii rzędu $p$ definiujemy następująco: $$y_t=c+\phi_1y_{t-1}+\phi_2y_{t-2}+\ldots+\phi_py_{t-p}+\varepsilon_t$$ gdzie $\varepsilon_t$ jest białym szumem. Taki model oznaczamy poprzez $AR(p)$.
+
+Co warto zauważyć, zmiana parametrów $\phi_1,\ldots,\phi_p$ skutukje różnymi "wzorcami" szeregów czasowych. Natomiast wariancja błędu $\varepsilon_t$ wpływa tylko na skalę szeregu, a nie jego wzorzec.
+
+
+Niech $AR(1)$. Wtedy:
+
+i) gdy $\phi_1=0$, $y_t$ jest równoważne białemu szumowi;
+
+ii) gdy $\phi_1=1$ oraz $c=0$, $y_t$ jest równoważne spacerowi losowemu;
+
+iii) gdy $\phi_1=1$, oraz $c\neq0$, $y_t$ jest równoważne spacerowi losowemu o przesunięciu równym $c$;
+
+iv) gdy $\phi_1<0$, $y_t$ ma tendencję do oscylowania wokół średniej.
+
+Zazwyczaj ograniczamy modele autoregresyjne do danych stacjonarnych, w którym to przypadku wymagane są pewne ograniczenia na wartości parametrów:
+
+i) dla modelu $AR(1)$ $-1<\phi_1<1$;
+
+ii) dla modelu $AR(2)$ $-1<\phi_2<1, \phi_1+\phi_2<1, \phi_2-\phi_1<1$.
+
+Gdy rząd $p\geq3$, to sprawa zaczyna się komplikować. Natomiast biblioteka "fable" radzi sobie z tymi komplikacjami podczas estymacji modelu.
+
+# Model Średniej Ruchomej
+
+Model średniej ruchomej rzędu $q$ wykorzystuje błędy prognoz z przeszłości w modelu podobnym do regresji, tj.: $$y_t=c+\varepsilon_t+\theta_1\varepsilon_{t-1}+\theta_2\varepsilon_{t-2}+\ldots+\theta_q\varepsilon_{t-q}$$ gdzie $\varepsilon_t$ jest białym szumem. Taki model oznaczamy poprzez $MA(q)$. Oczywiście, nie "obserwujemy" wartości $\varepsilon_t$ (,ponieważ jest to biały szum- losowość), więc nie jest to tak naprawdę regresja w zwykłym sensie.
+
+Uwaga! Nie należy mylić średniej modeli średniej ruchomej z wygładzaniem średniej ruchomej.Model średniej ruchomej jest wykorzystywany do prognozowania przyszłych wartości, natomiast wygładzanie średniej ruchomej jest wykorzystywane do szacowania cyklu trendu wartości przeszłych.
+
+Analogicznie jak w przypadku modelu autoregresjii, zmiana parametrów $\theta_1,\ldots,\theta_q$ skutukje różnymi "wzorcami" szeregów czasowych. Natomiast wariancja błędu $\varepsilon_t$ wpływa tylko na skalę szeregu, a nie jego wzorzec.
+
+Możemy zapisać dowonly stacjonarny model $AR(p)$ w postaci modelu $MA(\infty)$. Przykładowo, dla $AR(1)$ mamy: $$
+y_t = \phi_1y_{t-1}+\varepsilon_t = \phi_1(\phi_1y_{t-2}+\varepsilon_{t-1})+\varepsilon_t  = \phi^2_1y_{t-2}+\phi_1\varepsilon_{t-1}+\varepsilon_t = \phi^3_1y_{t-3}+\phi^2_1\varepsilon_{t-2}+\phi_1\varepsilon_{t-1}+\varepsilon_t =\ldots$$
+Jeżeli $-1<\phi_1<1$, wartości $\phi^k_1$ będą maleć wraz ze wzrostem $k$. Finalnie otrzymujemy proces $MA(\infty)$, tj.: $$y_t= \varepsilon_t+ \phi_1\varepsilon_{t-1}+ \phi^2_1\varepsilon_{t-2}+ \phi^3_1y_{t-3}+ \ldots$$
+
+Odwrotna zależność zachodzi, gdy na parametry $MA(q)$ nałożymy pewne ograniczenia. Wówczas model $MA(q)$ nazywamy odwracalnym. Oznacza to, że możemy zapisać dowolną odwracalną $MA(q)$ jako proces $AR(\infty)$. Przykładowo, rozważmy $MA(1)$. Wtedy $y_t=\varepsilon_t+\theta_1\varepsilon_{t-1}$. Korzystając z operatora przesunięcia wstecznego, tj.: $B\varepsilon_t=\varepsilon_{t-1}$, mamy: $$y_t=\varepsilon_t+\theta_1\varepsilon_{t-1}=\varepsilon_t(1+\theta_1B) \iff \varepsilon_t=\frac{y_t}{1+\theta_1B}=\frac{y_t}{1-(-\theta_1)B}$$ zauważmy, że przekształceniem jest wynik na sumę szeregu geometrycznego dla n=1 $\left( \displaystyle \sum _{n=1}^{\infty }aq^{n-1}=\frac{a}{1-q}, \; dla \; |q|<1 \right)$. Stąd, dla $a=y_{t-j}$ oraz $a=(-\theta_1)$ możemy zdefiniować "najnowszy" błąd jako $$\varepsilon_t=\sum _{j=0}^{\infty }(-\theta_1)^jy_{t-j}$$
+
+Wniosek:
+
+i) jeżeli $|\theta_1|>1$, to szereg jest rozbieżny oraz wagi $\theta_1$ rosną wraz ze wzrostem opóźnienia $j$, więc im bardziej odległe obserwacje, tym większy ich wpływ na bieżący błąd;
+
+ii) jeżeli $|\theta_1|=1$, to szereg jest rozbieżny oraz wagi $\theta_1$ mają stałą wielkość, a obserwacje odległe mają taki sam wpływ jak obserwacje niedawne;
+
+iii) jeżeli $|\theta_1|<1$, to szereg jest zbieżny oraz "nowsze" obserwacje mają większą wagę niż obserwacje z bardziej odległej przeszłości.
+
+Zatem proces $MA(1)$ jest odwracalny dla $|\theta_1|<1$.
+W przypadku $MA(2)$, aby model był odwracalny, wymaga się, aby $|\theta_2|<1$, $\theta_1+\theta_2>-1$ oraz $\theta_1-\theta_2<1$. W przypadku bardziej sklompikowanych ograniczeń dla $q\geq3$, znowu z pomocą przychodzi biblioteka "fable", która rozwiązuje takie problemy w ramach odpowiedniej funkcji.
+
+# (niesezonowy) Model ARIMA()
+
+Poprzez kombinację różnicowania wraz z autoregresją oraz srednią ruchomą, otrzymujemy (niesezonowy) model ARIMA(p,d,q): $$y'_t=c+\phi_1y'_{t-1}+\ldots+\phi_py'_{t-p}+\theta_1\varepsilon_{t-1}+\dots+\theta_q\varepsilon_{t-q}+\varepsilon_t$$ gdzie p jest rzędem autoregresjii, d jest stopniem pierwszego zróżnicowania oraz q jest rzędem sredniej ruchomej. Przy czym zachowane są założenia o stacjonarności oraz odwracalności dla autoregresjii oraz średniej ruchomej.
+
+Specjalne przypadki modelu ARIMA():
+
+i) gdy ARIMA(0,0,0), to mamy do czynienia z białym szumem;
+
+ii) gdy ARIMA(0,1,0) bez stałej $c$, to mamy do czynienia ze spacerem losowym;
+
+iii) gdy ARIMA(0,1,0) wraz ze stałą $c$, to mamy do czynienia ze spacerem losowym z przesunięciem;
+
+iv) gdy ARIMA(p,0,0), to mamy do czynienia z autoregresją;
+
+v) gdy ARIMA(0,0,q), to mamy do czynienia ze średnią ruchomą.
+
+Dla łatwiejszego tworzenia bardziej skomplikowanych modeli wykorzystujemy notacje przesunięcia wstecznego, aby przekształcić model (do postaci $AR(p)(d \; \; różnicowanie)=MA(q)$): $$(1-\phi_1B-\ldots-\phi_pB^p)(1-B)^dy_t=c+(1+\theta_1B+\ldots+\theta_qB^q)\varepsilon_t$$
+
+Jak się okazuję funkcja ARIMA() z biblioteki "fable" automatycznie dobiera odpowiednie parametry $p,d,q$.
+
+```{r, echo=F}
+# (próbna) Predykcja dla zbioru milk
+# Najpierw chcę zbadać przykładowy zbiór jakim posługuje się autor
+egipt <- global_economy %>%
+  filter(Code == "EGY") %>% dplyr::select(Exports) %>% as.ts(start = 1, frequency = 1)
+plot.ts(egipt, main = "Export w Egipcie")
+#decompose(egypt) # błąd- jest to szereg niesezonowy
+
+# standardowa procedura tworzenia modelu ARIMA() dla "Export"
+fit <- global_economy %>%
+  filter(Code == "EGY") %>%
+  model(ARIMA(Exports))
+cat("Wytworzony raport za pomocą wbudowanej funkcji report():")
+report(fit) # Wyświetla obiekt w odpowiednim formacie do raportowania- wbudowana funkcja biblioteki "fable"
+
+# Funckja zwróciła model ARIMA(2,0,1) (p= 2, d= 0, q= 1) o wspł.:
+# y_t= 2.5623+ 1.6764y_{t-1}- 0.8034y_{t-2}- 0.6896eps_{t-1}+ eps_t
+
+# str(fit) # Jest to obiekt typu modelu
+# plot(fit) # BŁĄD: Can't convert <lst_mdl> to <double>, gdzie <lst_mdl> jest to model
+
+pred <- forecast(fit, h= 10) # Ogólna funkcja służąca do prognozowania na podstawie szeregów czasowych lub modeli szeregów czasowych. Funkcja wywołuje poszczególne metody, które zależą od klasy pierwszego argumentu
+cat("Wytworzona predykcja za pomocą wbudowanej funkcji forecast():")
+pred
+
+pred %>% glimpse()
+cat("Dla $ Exports <dist> mamy do czynienia ze zmienną rozkładu")
+
+autoplot(pred) # Skorzystanie z funkcji autoplot() pozwala na (automatyczne) rysowanie bardziej złożonych obiektów
+pred %>% autoplot(global_economy)
+```
+
+Warto podkreślić, że stała $c$ ma istotny wpływ na prognozy długoterminowe uzyskane z modeli. Niech $p,q = 0$ oraz $\varepsilon_t=0$. Wtedy model $(1-\phi_1B-\ldots-\phi_pB^p)(1-B)^dy_t=c+(1+\theta_1B+\ldots+\theta_qB^q)\varepsilon_t$ przyjmuje postać $(1-B)^dy_t=c$. Stąd mamy interpretacje:
+
+i) jeżeli $c=0 \wedge d=0$, to $(1-B)^dy_t=c \implies (1-B)^0y_t=0 \iff y_t=0$ i długoterminowa prognoza będzie dążyć do zera;
+
+ii) jeżeli $c=0 \wedge d=1$, to $(1-B)^dy_t=c \implies (1-B)^1y_t=0 \iff y_t-y_{t-1}=0 \iff  y_t=y_{t-1}$ i długoterminowa prognoza będzie dążyć stałej niezerowej;
+
+iii) jeżeli $c=0 \wedge d=2$, to $(1-B)^dy_t=c \implies (1-B)^2y_t=0 \iff (1-2B+B^2)y_t=0 \iff y_t-2y_{t-1}+y_{t-2}=0 \iff  y_t=2y_{t-1}-y_{t-2}$ i długoterminowa prognoza będzie dążyć do linii prostej;
+
+vi) jeżeli $c\neq0 \wedge d=0$, to $(1-B)^dy_t=c \implies (1-B)^0y_t=c \iff y_t=c$ i długoterminowa prognoza będzie dążyć średniej z danych;
+
+v) jeżeli $c\neq0 \wedge d=1$, to $(1-B)^dy_t=c \implies (1-B)^1y_t=c \iff y_t-y_{t-1}=c \iff  y_t=c+y_{t-1}$ i długoterminowa prognoza będzie dążyć do linii prostej;
+
+vi) jeżeli $c\neq0 \wedge d=2$, to $(1-B)^dy_t=c \implies (1-B)^2y_t=c \iff (1-2B+B^2)y_t=c \iff y_t-2y_{t-1}+y_{t-2}=c \iff  y_t=c+2y_{t-1}-y_{t-2}$ i długoterminowa prognoza będzie dążyć do trendu kwadratowego.
+
+# ACF (autocorrelations funtion), a PCF (partial autocorrelations function)- szukanie p,q
+
+Wykres ACF pokazuje autokorelacje, które mierzą związek między  $y_t$ i $y_{t-k}$ dla różnych wartości $k$. Jeżeli $y_t$ i $y_{t-1}$ są skorelowane, to $y_{t-1}$ i $y_{t-2}$ również będą skorelowane. Jednakże, wtedy również $y_t$ i $y_{t-2}$ mogą być skorelowane, z uwagi na to, że oba są połączone z $y_{t-1}$, a nie z powodu jakichkolwiek nowych informacji zawartych w $y_{t-2}$, które mogłyby być wykorzystane do prognozowania $y_t$.
+
+Wykres PACF pokazuje pomiar związku pomiędzy $y_t$ i $y_{t-k}$ po ussuniciu wpływu "lagów" $1,2,3,\ldots,k-1$. Każda autokorelacja cząstkowa może być oszacowana jako ostatni współczynnik w modelu autoregresyjnym.
+
+Jeżeli mamy do czynienia z modelem ARIMA(p,d,0) lub ARIMA(0,d,q), to wykresy ACF i PACF mogą okazać się przydatne w określeniu wartości p lub q. Jednakże, jeżeli p,q > 0, to wtedy wykresy nie pomagają w znalezieniu odpowiednich wartości.
+
+Jeżeli wykresy ACF i PACF wykazuja następujące zachowania:
+
+i) ACF jest zanikający wykładniczo lub sinusoidalnie;
+
+ii) występuje istotny statystycznie "peak" dla lag-u $p$ w PACF, ale nigdzie poza nim;
+
+,to dane mogą dążyć do postaci modelu ARIMA(p,d,0),
+
+Analogicznie:
+
+i) PACF jest zanikający wykładniczo lub sinusoidalnie;
+
+ii) występuje istotny statystycznie "peak" dla lag-u $q$ w ACF, ale nigdzie poza nim;
+
+,to dane mogą dążyć do postaci modelu ARIMA(0,d,q),
+
+```{r, echo=F}
+acf(egipt, 58) # stacjonarny
+pacf(egipt, 58)
+```
+
+Dla ACF możemy zaobserwować zanikający sinusoidalnie wzór. Natomiast PACF wykazuje istotny "peak" dla lag-u 4 (model dla lag-u 2 powstał wcześniej). Utwórzmy zatem model ARIMA(4,0,0)
+
+```{r, echo=F}
+fit2 <- global_economy %>%
+  filter(Code == "EGY") %>%
+  model(ARIMA(Exports ~ pdq(4,0,0)))
+report(fit2)
+```
+
+Ten model jest tylko trochę gorszy od modelu ARIMA(2,0,1) (,który wykazał AICc równy 294.29- im mniejszy wynik tym lepszy model).
+
+Dodatkowo, korzystając z funkcji ARIMA(), możemy określić konkretne wartości pdq(), dla których chcemy utowrzyć model ARIMA().
+
+```{r, echo=F}
+fit3 <- global_economy %>%
+  filter(Code == "EGY") %>%
+  model(ARIMA(Exports ~ pdq(p=0:4, d=0, q=0:2)))
+report(fit3)
+```
+# MLE, AIC, AICc, BIC, czyli ocena skuteczności modelu
+
+Po ustaleniu parametrów $p,d,q$, należy wyestymować zmienne $c, \phi_1,\ldots,\phi_p, \theta_1,\ldots,\theta_q$. Bilbioteka "fable", podczas estymacji tych zmiennych dla modelu ARIMA(), domyślnie korzysta z algorytmu MLE (maximum likelihood estimation) do maksymalizacji prawdopodobieństwa uzyskania danych, które zaobserwowaliśmy. 
+
+Należy pamiętać, że modele ARIMA są znacznie bardziej skomplikowane do oszacowania niż modele regresji, a różne programy dadzą nieco inne odpowiedzi, ponieważ używają różnych metod estymacji i różnych algorytmów optymalizacji.
+
+Pakiet "fable" zawsze zwraca wartość z logarytmu wiarygodności danych $log(L)$, gdzie $L: \mathbb{R}^n$ x $\Theta \rightarrow [0, \infty)$ jest funkcją wiarygodności daną wzorem $$L(x_1,\ldots,x_n;\theta)=p_\theta(x_1;\theta)\ldots p_\theta(x_n;\theta), \forall(x_1,\ldots,x_n) \in \mathbb{R}^n $$ Dla danych wartości $p,d,q$, funkcja ARIMA() będzie starać się maksymalizować $log(L)$ podczas estymowania wartości zmiennych $c, \phi_1,\ldots,\phi_p, \theta_1,\ldots,\theta_q$.
+
+Trzema domyślnymi kryteriami informacyjnymi w ramach biblioteki "fable" są AIC (Akaike’s Information Criterion), AICc (Akaike’s Information Criterion corrected) oraz BIC (Bayesian Information Criterion). W celu uzyskania dobrego modelu, staramy się minimalizować powyższe kryteria (dla modelu ARIMA() głównie skupiamy się na AICc).
+
+Uwaga! kryteria informacyjne służą głównie do porównania modelu dla danych wartości $p,q$ (dążymy do minimalizacji wartości AIC, AICc, BIC, dla wybranych $p,q$). Dzieje się tak dlatego, że różnicowanie zmienia dane, na których obliczane jest prawdopodobieństwo, przez co wartości AIC pomiędzy modelami z różnymi rzędami różnicowania nie są porównywalne.
+
+# Działanie funkcji ARIMA()
+
+Funkcja ARIMA() z biblioteki "fable" wykorzystuje wariacje algorytmu Hyndman-Khandakar, który łączy w sobie test KPSS wraz z minimalizacją AICc i MLE, aby uzyskać model ARIMA. Dla zainteresowanych, w książce Hyndman-a, w rozdziale 9.7 "ARIMA modelling in fable", autor graficznie przedstawił schemat działania tegoż algorytmu.
+
+Podczas dopasowywania modelu ARIMA do (niesezonowego) szeregu czasowego, klasycznym podejściem jest:
+
+1) Narysowanie wykresu i identyfikacja nietypowych obserwacji.
+
+2) Jeżeli konieczna, transformacja danych dla ustabilizowania wariancji (transoframcja Box'a-Cox'a).
+
+3) Jeżeli szereg jest niestacjonarny, to identyfikacja sezonowości lub pierwsze różnicowanie danych (oba do momentu uzyskania szeregu stacjonarnego).
+
+4) Badanie wykresów ACF/PACF w celu stwierdzenia jaki model będzie odpowiedni (ARIMA(p,d,0) lub ARIMA(0,d,q)).
+
+5) Próba dobrania najlepszego modelu pod względem minimalizacji AICc.
+
+6) Sprawdzenie residuów z wybranego modelu poprzez narysowanie wykresu ACF.
+
+7) Prognoza, pod warunkiem, że residua przypominają biały szum.
+
+Algorytm Hyndman-Khandakar automatyzuje kroki 3-5. Dla przykładu posłużymy się zbiorem 'milk':
+
+```{r, echo=F, fig.height = 5, fig.width = 8}
+plot.ts(res)
+cat("Żadna transformacja nie jest wymagana")
+# Konwertujemy dane do postaci akceptowalnej przez funkcję ARIMA()
+# Następnie wskazujemy kolumnę ze zmiennymi losowymi
+fit <- as_tsibble(res) %>%  model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:2)))
+report(fit)
+cat("otrzymaliśmy model ARIMA(1,0,0), tj. Autoregresję dla p= 1")
+cat("\n")
+cat("Próba uzyskania lepszego modelu")
+fit_tst <- as_tsibble(res) %>%  model(ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:2), greedy = F, approximation = F, stepwise = F))
+report(fit_tst)
+
+cat("Okazuję się, że można również zrobić to krócej")
+res_fit <- as_tsibble(res) %>%  model(res1 = ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:2)),
+                                  res2 = ARIMA(value ~ pdq(p=0:4, d=0:2, q=0:2), greedy = F, approximation = F, stepwise = F))
+glance(res_fit) # Wykorzystuje modele w obrębie mable do utworzenia jednowierszowego podsumowania ich dopasowania.
+cat("Z powyższej tabeli można stwierdzić, że model ARIMA(1,0,0) był lepiej dopasowany")
+cat("\n")
+cat("Wykorzystanie funkcji gg_tsresiduals() do zbadania residuów")
+fit %>%
+  gg_tsresiduals()
+cat("Oczywiście możemy również wydobyć wartości residuów ręcznie poprzez funkcję stats::residuals()")
+reszty <- residuals(fit)$'.resid'
+plot(reszty, t="l")
+TSA::acf(reszty, 45)
+cat("Przypominają one biały szum")
+cat("\n")
+cat("Możemy dodatkowo sprawdzić czy reszty mają rozkład normalny")
+qqnorm(reszty)
+qqline(reszty, col = 2)
+cat("Zatem możemy przejść do predykcji")
+fit %>% forecast(h=10) %>%
+    autoplot(res)+
+    labs(y = "res (milk)")
+
+fit %>% forecast(h=10) %>%
+    autoplot(res)+
+    labs(y = "res (milk)")+
+    coord_cartesian(xlim=c('2005-01-01','2007-01-01'))
+```
+
+Domyślnie, funkcja ARIMA() automatycznie określam czy stała jest wymagana. Dla d= 0 lub d= 1, stała zostanie uwzględniona, jeśli poprawi to wartość AICc. Jeżeli $d > 1$ stała jest zawsze pomijana, ponieważ trend kwadratowy lub wyższego rzędu jest szczególnie niebezpieczny przy prognozowaniu. Oczywiście możemy zmusić model do uwzględnienia bądź zignorowania stałej.
+
+```{r, echo=F}
+cat("ARIMA(value ~ 1 + ... ,gdzie 1 oznacza wymuszenie uwzględnienia stałej")
+fit <- as_tsibble(res) %>%  model(ARIMA(value ~ 1 + pdq(p=0:4, d=0:2, q=0:2)))
+report(fit)
+cat("ARIMA(value ~ 0 + ... ,gdzie 0 oznacza wymuszenie zignorowania stałej")
+fit <- as_tsibble(res) %>%  model(ARIMA(value ~ 0 + pdq(p=0:4, d=0:2, q=0:2)))
+report(fit)
+```
+Uwaga! Przedziały ufności dla modeli ARIMA opierają się na założeniu, że reszty są nieskorelowane i mają rozkład normalny. Jeżeli którekolwiek z tych założeń nie jest spełnione, wówczas przedziały predykcji mogą być nieprawidłowe. Z tego powodu, zawsze należy sporządzić wykres ACF i histogram reszt w celu sprawdzenia założeń przed sporządzeniem przedziałów ufności.
+
+Jeżeli reszty są nieskorelowane, ale nie mają rozkładu normalnego, to zamiast tego można zastosować Bootstrap (wprowadzone przez Bradleya Efrona metody szacowania rozkładu błędów estymacji, za pomocą wielokrotnego losowania ze zwracaniem z próby. Są przydatne szczególnie, gdy nie jest znana postać rozkładu zmiennej w populacji). Wystarczy do funkcji forecast() dodać "bootstrap=TRUE".
+
+```{r, include=T, echo=F}
+fit <- as_tsibble(speech) %>%  model(ARIMA(value ~ pdq(p=0:10, d=0:10, q=0:10), greedy = F, approximation = F, stepwise = F))
+report(fit)
+
+fit %>% forecast(h=365) %>%
+    autoplot(speech)+
+    labs(y = "speech")
+
+fit %>% forecast(h=365) %>%
+    autoplot(speech)+
+    labs(y = "speech")+
+    coord_cartesian(xlim=c(1000,1135), ylim=c(1000,3000))
+```
+
+
+```{r}
+acf(roz12, 100)
+pacf(roz12, 100)
+fit <- as_tsibble(milk) %>%  model(ARIMA(value ~ pdq(p=0:8, d=0:2, q=0:8)))
+report(fit)
+acf(res, 100)
+pacf(res, 100)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
